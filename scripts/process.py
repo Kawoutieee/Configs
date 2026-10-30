@@ -1,20 +1,11 @@
 import csv
 import json
 import base64
-import re
 
 def load_results(path):
-    """Parses xray-knife CSV to extract config link and real IP."""
-    results = []
+    """Reads working.json produced by the extraction step."""
     with open(path, 'r') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row.get('status') == 'working' and row.get('ip') and row.get('link'):
-                results.append({
-                    'link': row['link'],
-                    'ip': row['ip']
-                })
-    return results
+        return json.load(f)
 
 def load_countries(path):
     """Loads IP -> country code mapping."""
@@ -52,7 +43,7 @@ def rename_config(link, ip, country_code, score):
 
 def main():
     # Load data
-    results = load_results('output/results.csv')
+    results = load_results('output/working.json')
     countries = load_countries('output/countries.json')
     fraud_scores = load_fraud_scores('output/fraud.csv')
 
@@ -80,7 +71,7 @@ def main():
 
     # Print summary
     print(f"\n--- Processed {len(final_lines)} working configs ---")
-    for line in summary[:20]: # Show first 20 for brevity
+    for line in summary[:20]:  # Show first 20 for brevity
         print(line)
     if len(summary) > 20:
         print(f"... and {len(summary) - 20} more.")
