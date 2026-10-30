@@ -43,19 +43,20 @@ jobs:
         run: |
           git clone https://github.com/Allespro/go-scamalytics.git
           cd go-scamalytics
-          # 1. Initialize Go module (the repo lacks go.mod)
-          go mod init github.com/Allespro/go-scamalytics
-          # 2. Create a main wrapper that calls the CLI Start() function
+          # 1. Initialize with the correct lowercase module path
+          go mod init github.com/allespro/go-scamalytics
+          # 2. Create a main wrapper that imports and calls cli.Start()
           cat > main.go <<'EOF'
           package main
           import (
-              goscamalytics_cli "github.com/allespro/go-scamalytics/cli"
+              "github.com/allespro/go-scamalytics/cli"
           )
           func main() {
-              goscamalytics_cli.Start()
+              cli.Start()
           }
           EOF
-          # 3. Build the executable from the wrapper
+          # 3. Fetch dependencies and build the binary
+          go mod tidy
           go build -o goscamalytics_cli .
           sudo mv goscamalytics_cli /usr/local/bin/
           goscamalytics_cli --help || true
