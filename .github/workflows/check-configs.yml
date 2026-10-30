@@ -61,30 +61,36 @@ jobs:
 
           ips = set()
           working = []
+          skipped = 0
 
           try:
               with open('output/results.csv', 'r', encoding='utf-8-sig') as f:
-                  sample = f.read(600)
-                  print("=== CSV SAMPLE (first 600 bytes) ===")
-                  print(sample)
-                  print("=== END SAMPLE ===\n")
-                  f.seek(0)
-
                   reader = csv.DictReader(f)
                   print(f"Headers: {reader.fieldnames}")
 
-                  ip_col   = find_col(reader.fieldnames, ['ip', 'real_ip', 'exit_ip', 'ip_address'])
-                  link_col = find_col(reader.fieldnames, ['link', 'config', 'url', 'remark', 'name'])
+                  ip_col     = find_col(reader.fieldnames, ['ip', 'real_ip', 'exit_ip', 'ip_address'])
+                  link_col   = find_col(reader.fieldnames, ['link', 'config', 'url', 'remark', 'name'])
+                  status_col = find_col(reader.fieldnames, ['status'])
+                  succ_col   = find_col(reader.fieldnames, ['success'])
 
-                  print(f"Detected: ip={ip_col!r}, link={link_col!r}")
+                  print(f"Detected: ip={ip_col!r}, link={link_col!r}, status={status_col!r}, success={succ_col!r}")
 
                   for row in reader:
+                      # Require an explicit "passed" status, or success == 1 as fallback
+                      passed = False
+                      if status_col and (row.get(status_col) or '').strip().lower() == 'passed':
+                          passed = True
+                      elif succ_col and str(row.get(succ_col, '')).strip() == '1':
+                          passed = True
+                      if not passed:
+                          skipped += 1
+                          continue
+
                       ip   = (row.get(ip_col) or '').strip() if ip_col else ''
                       link = (row.get(link_col) or '').strip() if link_col else ''
-                      if ip:
+                      if ip and link:
                           ips.add(ip)
-                          if link:
-                              working.append({'link': link, 'ip': ip})
+                          working.append({'link': link, 'ip': ip})
 
           except Exception as e:
               print(f"ERROR: {e}", file=sys.stderr)
@@ -97,9 +103,9 @@ jobs:
           with open('output/working.json', 'w') as f:
               json.dump(working, f, indent=2)
 
-          print(f"\nExtracted {len(ips)} unique IPs, {len(working)} working configs.")
+          print(f"\nExtracted {len(ips)} unique IPs, {len(working)} working configs ({skipped} skipped as failed).")
           PYEOF
-
+          
       - name: Country lookup (ip-api.com)
         run: |
           if [ ! -s output/ips.txt ]; then
