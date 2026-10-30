@@ -3,7 +3,7 @@ name: Check and Score Xray Configs
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *' # Daily at midnight UTC
+    - cron: '0 0 * * *'
 
 jobs:
   check-configs:
@@ -11,6 +11,17 @@ jobs:
     permissions:
       contents: write
       actions: read
+
+    env:
+      # Comma-separated ISO country codes to KEEP, e.g. "US,GB,DE".
+      # Leave empty to keep all countries.
+      COUNTRY_FILTER: ${{ vars.COUNTRY_FILTER || '' }}
+      # Fraud-score filter. Options: all | lt50 | lt33 | zero
+      #   all  = keep every config regardless of score
+      #   lt50 = keep score < 50
+      #   lt33 = keep score < 33   (default)
+      #   zero = keep only score == 0
+      SCORE_FILTER: ${{ vars.SCORE_FILTER || 'lt33' }}
 
     steps:
       - name: Checkout repository
@@ -32,7 +43,6 @@ jobs:
       - name: Parse subscriptions
         run: |
           bash scripts/parse_subscriptions.sh
-          echo "Parsed configs:"
           wc -l output/configs.txt
 
       - name: Test configs with xray-knife
@@ -41,7 +51,7 @@ jobs:
           xray-knife http -f output/configs.txt --type csv -o output/results.csv
           set -e
           if [ ! -f output/results.csv ]; then
-            echo "::warning::xray-knife produced no results.csv — all configs may have failed."
+            echo "::warning::xray-knife produced no results.csv"
             echo "" > output/results.csv
           fi
 
@@ -51,61 +61,44 @@ jobs:
           import csv, json, sys
 
           def find_col(fields, candidates):
-              if not fields:
-                  return None
+              if not fields: return None
               lower = {f.lower(): f for f in fields}
               for c in candidates:
-                  if c.lower() in lower:
-                      return lower[c.lower()]
+                  if c.lower() in lower: return lower[c.lower()]
               return None
 
-          ips = set()
-          working = []
-          skipped = 0
+          ips, working, skipped = set(), [], 0
 
-          try:
-              with open('output/results.csv', 'r', encoding='utf-8-sig') as f:
-                  reader = csv.DictReader(f)
-                  print(f"Headers: {reader.fieldnames}")
+          with open('output/results.csv', 'r', encoding='utf-8-sig') as f:
+              reader = csv.DictReader(f)
+              ip_col     = find_col(reader.fieldnames, ['ip', 'real_ip', 'exit_ip', 'ip_address'])
+              link_col   = find_col(reader.fieldnames, ['link', 'config', 'url', 'remark', 'name'])
+              status_col = find_col(reader.fieldnames, ['status'])
+              succ_col   = find_col(reader.fieldnames, ['success'])
 
-                  ip_col     = find_col(reader.fieldnames, ['ip', 'real_ip', 'exit_ip', 'ip_address'])
-                  link_col   = find_col(reader.fieldnames, ['link', 'config', 'url', 'remark', 'name'])
-                  status_col = find_col(reader.fieldnames, ['status'])
-                  succ_col   = find_col(reader.fieldnames, ['success'])
-
-                  print(f"Detected: ip={ip_col!r}, link={link_col!r}, status={status_col!r}, success={succ_col!r}")
-
-                  for row in reader:
-                      # Require an explicit "passed" status, or success == 1 as fallback
-                      passed = False
-                      if status_col and (row.get(status_col) or '').strip().lower() == 'passed':
-                          passed = True
-                      elif succ_col and str(row.get(succ_col, '')).strip() == '1':
-                          passed = True
-                      if not passed:
-                          skipped += 1
-                          continue
-
-                      ip   = (row.get(ip_col) or '').strip() if ip_col else ''
-                      link = (row.get(link_col) or '').strip() if link_col else ''
-                      if ip and link:
-                          ips.add(ip)
-                          working.append({'link': link, 'ip': ip})
-
-          except Exception as e:
-              print(f"ERROR: {e}", file=sys.stderr)
-              import traceback; traceback.print_exc()
+              for row in reader:
+                  passed = False
+                  if status_col and (row.get(status_col) or '').strip().lower() == 'passed':
+                      passed = True
+                  elif succ_col and str(row.get(succ_col, '')).strip() == '1':
+                      passed = True
+                  if not passed:
+                      skipped += 1
+                      continue
+                  ip   = (row.get(ip_col) or '').strip() if ip_col else ''
+                  link = (row.get(link_col) or '').strip() if link_col else ''
+                  if ip and link:
+                      ips.add(ip)
+                      working.append({'link': link, 'ip': ip})
 
           with open('output/ips.txt', 'w') as f:
-              for ip in sorted(ips):
-                  f.write(ip + '\n')
-
+              for ip in sorted(ips): f.write(ip + '\n')
           with open('output/working.json', 'w') as f:
               json.dump(working, f, indent=2)
 
-          print(f"\nExtracted {len(ips)} unique IPs, {len(working)} working configs ({skipped} skipped as failed).")
+          print(f"Extracted {len(ips)} unique IPs, {len(working)} working configs ({skipped} skipped).")
           PYEOF
-          
+
       - name: Country lookup (ip-api.com)
         run: |
           if [ ! -s output/ips.txt ]; then
@@ -113,79 +106,136 @@ jobs:
             echo "{}" > output/countries.json
             exit 0
           fi
-
           python3 <<'PYEOF'
           import json, time, urllib.request
-
           with open('output/ips.txt') as f:
               ips = [line.strip() for line in f if line.strip()]
-
           countries = {}
-          batch_size = 100
-          for i in range(0, len(ips), batch_size):
-              batch = ips[i:i+batch_size]
+          for i in range(0, len(ips), 100):
+              batch = ips[i:i+100]
               req = urllib.request.Request(
                   'http://ip-api.com/batch?fields=countryCode,query',
                   data=json.dumps([{'query': ip} for ip in batch]).encode(),
-                  headers={'Content-Type': 'application/json'}
-              )
+                  headers={'Content-Type': 'application/json'})
               try:
                   with urllib.request.urlopen(req) as resp:
-                      data = json.loads(resp.read().decode())
-                      for entry in data:
+                      for entry in json.loads(resp.read().decode()):
                           if entry.get('countryCode'):
                               countries[entry['query']] = entry['countryCode']
               except Exception as e:
                   print(f'Batch lookup failed: {e}')
               time.sleep(4)
-
           with open('output/countries.json', 'w') as f:
               json.dump(countries, f)
           print(f'Resolved {len(countries)} country codes.')
           PYEOF
 
+      # ── NEW: Country filter (runs BEFORE the score check to save quota) ──
+      - name: Country filter
+        run: |
+          python3 <<'PYEOF'
+          import json, os, sys
+
+          whitelist = [c.strip().upper() for c in os.environ.get('COUNTRY_FILTER', '').split(',') if c.strip()]
+          if not whitelist:
+              print("No COUNTRY_FILTER set — keeping all countries.")
+              sys.exit(0)
+
+          print(f"Country whitelist: {whitelist}")
+
+          with open('output/countries.json') as f:
+              countries = json.load(f)
+          with open('output/working.json') as f:
+              working = json.load(f)
+
+          kept = [e for e in working if countries.get(e['ip'], '').upper() in whitelist]
+          dropped = len(working) - len(kept)
+
+          with open('output/working.json', 'w') as f:
+              json.dump(kept, f, indent=2)
+          with open('output/ips.txt', 'w') as f:
+              for ip in sorted({e['ip'] for e in kept}):
+                  f.write(ip + '\n')
+
+          print(f"Kept {len(kept)} configs, dropped {dropped} by country filter.")
+          PYEOF
+
+      # ── Score check runs only against the filtered IPs ──
       - name: Query proxycheck.io v3 for fraud scores
         env:
           PROXYCHECK_API_KEY: ${{ secrets.PROXYCHECK_API_KEY }}
         run: |
           echo "ip,score,risk" > output/fraud.csv
-
           if [ ! -s output/ips.txt ]; then
             echo "::warning::No IPs to check."
             exit 0
           fi
-
           while IFS= read -r ip; do
             [ -z "$ip" ] && continue
-
             if [ -n "$PROXYCHECK_API_KEY" ]; then
               url="https://proxycheck.io/v3/${ip}?key=${PROXYCHECK_API_KEY}"
             else
               url="https://proxycheck.io/v3/${ip}"
             fi
-
             response=$(curl -s "$url")
             score=$(echo "$response" | jq -r --arg ip "$ip" '.[$ip].detections.risk // "NA"')
-
-            if [ "$score" = "NA" ]; then
-              risk_label="NA"
-            elif [ "$score" -le 33 ]; then
-              risk_label="low"
-            elif [ "$score" -le 66 ]; then
-              risk_label="medium"
-            else
-              risk_label="high"
+            if [ "$score" = "NA" ]; then risk_label="NA"
+            elif [ "$score" -le 33 ]; then risk_label="low"
+            elif [ "$score" -le 66 ]; then risk_label="medium"
+            else risk_label="high"
             fi
-
             echo "${ip},${score},${risk_label}" >> output/fraud.csv
             sleep 1
           done < output/ips.txt
-
           echo "Fraud score query complete."
 
-      - name: Merge results and rename configs
+      # ── NEW: Score filter (runs after scoring, before merge) ──
+      - name: Score filter
         run: |
-          python3 scripts/process.py
+          python3 <<'PYEOF'
+          import csv, json, os, sys
+
+          mode = os.environ.get('SCORE_FILTER', 'lt33').strip().lower()
+          print(f"Score filter mode: {mode}")
+
+          def passes(score):
+              if mode == 'all':
+                  return True
+              if score in (None, '', 'NA'):
+                  return False
+              try:
+                  s = int(score)
+              except (TypeError, ValueError):
+                  return False
+              if mode == 'lt50':
+                  return s < 50
+              if mode == 'lt33':
+                  return s < 33
+              if mode == 'zero':
+                  return s == 0
+              print(f"::warning::Unknown SCORE_FILTER '{mode}', defaulting to keep-all.")
+              return True
+
+          scores = {}
+          with open('output/fraud.csv') as f:
+              for row in csv.DictReader(f):
+                  if row.get('ip'):
+                      scores[row['ip']] = row.get('score', 'NA')
+
+          with open('output/working.json') as f:
+              working = json.load(f)
+
+          kept = [e for e in working if passes(scores.get(e['ip'], 'NA'))]
+          dropped = len(working) - len(kept)
+
+          with open('output/working.json', 'w') as f:
+              json.dump(kept, f, indent=2)
+
+          print(f"Kept {len(kept)} configs after score filter, dropped {dropped}.")
+          PYEOF
+
+      - name: Merge results and rename configs
+        run: python3 scripts/process.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
