@@ -48,13 +48,21 @@ jobs:
       - name: Test configs with xray-knife
         run: |
           set +e
-          xray-knife http -f output/configs.txt --type csv -o output/results.csv
+          xray-knife http \
+            -f output/configs.txt \
+            --core auto \
+            --threads 150 \
+            --timeout 15 \
+            --retries 1 \
+            --resolver https://1.1.1.1/dns-query \
+            --type csv \
+            -o output/results.csv
           set -e
           if [ ! -f output/results.csv ]; then
             echo "::warning::xray-knife produced no results.csv"
             echo "" > output/results.csv
           fi
-
+          
       - name: Extract working IPs
         run: |
           python3 <<'PYEOF'
