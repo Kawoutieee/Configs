@@ -3,13 +3,13 @@ name: Check and Score Xray Configs
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *' # Runs daily at midnight UTC
+    - cron: '0 0 * * *' # Daily at midnight UTC
 
 jobs:
   check-configs:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Needed to commit the final output back to the repo
+      contents: write
       actions: read
 
     steps:
@@ -19,9 +19,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.27' # Required for xray-knife v11
+          go-version: '1.27'
           cache: true
-          cache-dependency-path: go.sum # Cache Go modules
 
       - name: Install xray-knife
         run: |
@@ -39,7 +38,7 @@ jobs:
       - name: Test configs with xray-knife
         run: |
           set +e
-          xray-knife http -f output/configs.txt --speedtest --type csv -o output/results.csv
+          xray-knife http -f output/configs.txt --type csv -o output/results.csv
           set -e
           if [ ! -f output/results.csv ]; then
             echo "::warning::xray-knife produced no results.csv — all configs may have failed."
@@ -48,23 +47,58 @@ jobs:
 
       - name: Extract working IPs
         run: |
-          # Use Python to extract real IPs from the xray-knife CSV
-          python3 -c "
-          import csv
+          python3 <<'PYEOF'
+          import csv, json, sys
+
+          def find_col(fields, candidates):
+              if not fields:
+                  return None
+              lower = {f.lower(): f for f in fields}
+              for c in candidates:
+                  if c.lower() in lower:
+                      return lower[c.lower()]
+              return None
+
           ips = set()
+          working = []
+
           try:
-              with open('output/results.csv', 'r') as f:
+              with open('output/results.csv', 'r', encoding='utf-8-sig') as f:
+                  sample = f.read(600)
+                  print("=== CSV SAMPLE (first 600 bytes) ===")
+                  print(sample)
+                  print("=== END SAMPLE ===\n")
+                  f.seek(0)
+
                   reader = csv.DictReader(f)
+                  print(f"Headers: {reader.fieldnames}")
+
+                  ip_col   = find_col(reader.fieldnames, ['ip', 'real_ip', 'exit_ip', 'ip_address'])
+                  link_col = find_col(reader.fieldnames, ['link', 'config', 'url', 'remark', 'name'])
+
+                  print(f"Detected: ip={ip_col!r}, link={link_col!r}")
+
                   for row in reader:
-                      if row.get('status') == 'working' and row.get('ip'):
-                          ips.add(row['ip'])
+                      ip   = (row.get(ip_col) or '').strip() if ip_col else ''
+                      link = (row.get(link_col) or '').strip() if link_col else ''
+                      if ip:
+                          ips.add(ip)
+                          if link:
+                              working.append({'link': link, 'ip': ip})
+
           except Exception as e:
-              print(f'Error reading results: {e}')
+              print(f"ERROR: {e}", file=sys.stderr)
+              import traceback; traceback.print_exc()
+
           with open('output/ips.txt', 'w') as f:
               for ip in sorted(ips):
                   f.write(ip + '\n')
-          print(f'Extracted {len(ips)} unique working IPs.')
-          "
+
+          with open('output/working.json', 'w') as f:
+              json.dump(working, f, indent=2)
+
+          print(f"\nExtracted {len(ips)} unique IPs, {len(working)} working configs.")
+          PYEOF
 
       - name: Country lookup (ip-api.com)
         run: |
@@ -74,7 +108,7 @@ jobs:
             exit 0
           fi
 
-          python3 -c "
+          python3 <<'PYEOF'
           import json, time, urllib.request
 
           with open('output/ips.txt') as f:
@@ -97,12 +131,12 @@ jobs:
                               countries[entry['query']] = entry['countryCode']
               except Exception as e:
                   print(f'Batch lookup failed: {e}')
-              time.sleep(4) # Respect rate limit
+              time.sleep(4)
 
           with open('output/countries.json', 'w') as f:
               json.dump(countries, f)
           print(f'Resolved {len(countries)} country codes.')
-          "
+          PYEOF
 
       - name: Query proxycheck.io v3 for fraud scores
         env:
