@@ -16,12 +16,12 @@ jobs:
       # Comma-separated ISO country codes to KEEP, e.g. "US,GB,DE".
       # Leave empty to keep all countries.
       COUNTRY_FILTER: ${{ vars.COUNTRY_FILTER || '' }}
-      # Fraud-score filter. Options: all | lt50 | lt33 | zero
-      #   all  = keep every config regardless of score
-      #   lt50 = keep score < 50
-      #   lt33 = keep score < 33   (default)
-      #   zero = keep only score == 0
-      SCORE_FILTER: ${{ vars.SCORE_FILTER || 'lt33' }}
+      # Fraud-score filter. Options: all | lt50 | lte33 | zero
+      #   all   = keep every config regardless of score
+      #   lt50  = keep score < 50
+      #   lte33 = keep score <= 33   (default — "33 and less")
+      #   zero  = keep only score == 0
+      SCORE_FILTER: ${{ vars.SCORE_FILTER || 'lte33' }}
 
     steps:
       - name: Checkout repository
@@ -130,7 +130,6 @@ jobs:
           print(f'Resolved {len(countries)} country codes.')
           PYEOF
 
-      # ── NEW: Country filter (runs BEFORE the score check to save quota) ──
       - name: Country filter
         run: |
           python3 <<'PYEOF'
@@ -160,7 +159,6 @@ jobs:
           print(f"Kept {len(kept)} configs, dropped {dropped} by country filter.")
           PYEOF
 
-      # ── Score check runs only against the filtered IPs ──
       - name: Query proxycheck.io v3 for fraud scores
         env:
           PROXYCHECK_API_KEY: ${{ secrets.PROXYCHECK_API_KEY }}
@@ -189,13 +187,15 @@ jobs:
           done < output/ips.txt
           echo "Fraud score query complete."
 
-      # ── NEW: Score filter (runs after scoring, before merge) ──
       - name: Score filter
         run: |
           python3 <<'PYEOF'
           import csv, json, os, sys
 
-          mode = os.environ.get('SCORE_FILTER', 'lt33').strip().lower()
+          mode = os.environ.get('SCORE_FILTER', 'lte33').strip().lower()
+          # Backwards compat: treat legacy 'lt33' as 'lte33'
+          if mode == 'lt33':
+              mode = 'lte33'
           print(f"Score filter mode: {mode}")
 
           def passes(score):
@@ -209,8 +209,8 @@ jobs:
                   return False
               if mode == 'lt50':
                   return s < 50
-              if mode == 'lt33':
-                  return s < 33
+              if mode == 'lte33':
+                  return s <= 33
               if mode == 'zero':
                   return s == 0
               print(f"::warning::Unknown SCORE_FILTER '{mode}', defaulting to keep-all.")
