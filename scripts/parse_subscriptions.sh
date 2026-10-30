@@ -1,51 +1,35 @@
 #!/bin/bash
 set -e
 
+INPUT_FILE="subscriptions.txt"
+OUTPUT_FILE="output/configs.txt"
+
 mkdir -p output
-> output/configs.txt
+> "$OUTPUT_FILE" # Clear output file
 
-if [ ! -f "subscriptions.txt" ]; then
-  echo "Error: subscriptions.txt not found!"
-  exit 1
+if [ ! -f "$INPUT_FILE" ]; then
+    echo "::error::subscriptions.txt not found!"
+    exit 1
 fi
 
-if [ ! -s "subscriptions.txt" ]; then
-  echo "Error: subscriptions.txt is empty!"
-  exit 1
-fi
+while IFS= read -r url || [ -n "$url" ]; do
+    # Skip blank lines and comments
+    [[ -z "$url" || "$url" =~ ^# ]] && continue
 
-echo "Processing subscriptions..."
+    echo "Fetching: $url"
+    body=$(curl -sL --max-time 30 "$url")
 
-while IFS= read -r url; do
-  # Skip blank lines and comments
-  if [[ -z "$url" || "$url" == \#* ]]; then 
-    continue
-  fi
+    # Check if the body is base64 encoded
+    if echo "$body" | base64 -d >/dev/null 2>&1; then
+        echo "$body" | base64 -d >> "$OUTPUT_FILE"
+    else
+        echo "$body" >> "$OUTPUT_FILE"
+    fi
+    # Ensure a newline separates entries
+    echo "" >> "$OUTPUT_FILE"
+done < "$INPUT_FILE"
 
-  echo "Fetching: $url"
-  
-  # Download content, ignore failure on single URL
-  content=$(curl -sL "$url" || true)
-  if [ -z "$content" ]; then 
-    echo "  -> Empty or failed to fetch."
-    continue
-  fi
+# Deduplicate and remove blank lines
+sort -u "$OUTPUT_FILE" | grep -v '^$' > "${OUTPUT_FILE}.tmp" && mv "${OUTPUT_FILE}.tmp" "$OUTPUT_FILE"
 
-  # Detect if it's base64 encoded. If no common proxy protocol is found in plain text, assume base64.
-  if ! echo "$content" | grep -qE "(vmess|vless|trojan|ss)://"; then
-    echo "  -> Decoding base64..."
-    content=$(echo "$content" | base64 -d 2>/dev/null || true)
-  fi
-
-  # Extract only lines starting with known protocols
-  echo "$content" | grep -E "^(vmess|vless|trojan|ss)://" >> output/configs.txt || true
-
-done < subscriptions.txt
-
-# Deduplicate
-if [ -s output/configs.txt ]; then
-  sort -u output/configs.txt -o output/configs.txt
-  echo "Extracted $(wc -l < output/configs.txt) unique configs."
-else
-  echo "No valid configs found across subscriptions."
-fi
+echo "Parsed configs saved to $OUTPUT_FILE"
