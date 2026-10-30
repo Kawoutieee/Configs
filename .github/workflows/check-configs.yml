@@ -1,0 +1,134 @@
+name: Check & Filter Proxy Configs
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'subscriptions.txt'
+
+permissions:
+  contents: write
+
+jobs:
+  process-configs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'  # xray-knife v11 requires Go 1.27
+          
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Output Directory
+        run: mkdir -p output
+
+      - name: Install xray-knife
+        run: |
+          go install -tags "with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,with_grpc" \
+            github.com/lilendian0x00/xray-knife/v11@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+          xray-knife --version
+          
+      - name: Install goscamalytics
+        run: |
+          git clone https://github.com/Allespro/go-scamalytics.git
+          cd go-scamalytics
+          go build -o goscamalytics_cli ./cli   # entrypoint is in ./cli
+          sudo mv goscamalytics_cli /usr/local/bin/
+          goscamalytics_cli --help || true
+          
+      - name: Parse Subscriptions
+        run: bash scripts/parse_subscriptions.sh
+
+      - name: Test configs with xray-knife
+        run: |
+          set +e
+          xray-knife http -f output/configs.txt --speedtest --type csv -o output/results.csv
+          set -e
+          if [ ! -f output/results.csv ]; then
+            echo "::warning::xray-knife produced no results.csv — all configs may have failed"
+            echo "" > output/results.csv
+          fi
+          
+      - name: Extract IPs and Lookup Countries
+        run: |
+          python -c "
+          import csv, json, sys, urllib.request, time, os
+          
+          if not os.path.exists('output/results.csv'):
+              print('No results.csv found. Skipping.')
+              sys.exit(0)
+              
+          ips = set()
+          with open('output/results.csv', 'r', encoding='utf-8') as f:
+              reader = csv.reader(f)
+              headers = [h.lower() for h in next(reader, [])]
+              
+              ip_idx = next((i for i, h in enumerate(headers) if 'ip' in h), -1)
+              if ip_idx == -1:
+                  print('Could not find IP column in results.csv')
+                  sys.exit(0)
+                  
+              for row in reader:
+                  if len(row) > ip_idx and row[ip_idx].strip():
+                      ips.add(row[ip_idx].strip())
+                      
+          with open('output/ips.txt', 'w') as f:
+              f.write('\n'.join(ips) + '\n')
+              
+          ips = list(ips)
+          chunks = [ips[i:i + 100] for i in range(0, len(ips), 100)]
+          countries = {}
+          
+          for chunk in chunks:
+              data = json.dumps([{'query': ip} for ip in chunk]).encode('utf-8')
+              req = urllib.request.Request('http://ip-api.com/batch?fields=query,countryCode', data=data, headers={'Content-Type': 'application/json'})
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      for item in json.loads(resp.read()):
+                          if item.get('countryCode'):
+                              countries[item['query']] = item['countryCode']
+              except Exception as e:
+                  print(f'IP-API Error: {e}')
+              time.sleep(4) # Respect 15 req/min rate limit
+              
+          with open('output/countries.json', 'w') as f:
+              json.dump(countries, f)
+          "
+
+      - name: Fraud Score Lookup
+        run: |
+          if [ -s output/ips.txt ]; then
+            # VERIFY: Ensure useragents.txt exists and CLI arguments match the built binary.
+            goscamalytics_cli -i output/ips.txt -o output/fraud.csv -u useragents.txt || echo "goscamalytics failed, continuing with missing scores"
+          else
+            echo "No IPs to check."
+            touch output/fraud.csv
+          fi
+
+      - name: Merge and Rename
+        run: python scripts/process.py
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: working-configs
+          path: |
+            output/final.txt
+            output/final_base64.txt
+          retention-days: 7
+
+      - name: Commit Back to Repo
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/final.txt output/final_base64.txt || true
+          git commit -m "chore: update checked proxy configs [skip ci]" || echo "No changes to commit"
+          git push || echo "Push failed, ensure workflow has write permissions."
