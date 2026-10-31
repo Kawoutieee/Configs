@@ -50,6 +50,7 @@ jobs:
           set +e
           xray-knife http \
             -f output/configs.txt \
+            --core sing-box \ 
             --type csv \
             -o output/results.csv
           set -e
