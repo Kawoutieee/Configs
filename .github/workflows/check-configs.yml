@@ -51,10 +51,9 @@ jobs:
           xray-knife http \
             -f output/configs.txt \
             --core auto \
-            --threads 150 \
+            --threads 50 \
             --timeout 15 \
             --retries 1 \
-            --resolver https://1.1.1.1/dns-query \
             --type csv \
             -o output/results.csv
           set -e
