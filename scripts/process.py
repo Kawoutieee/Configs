@@ -4,19 +4,17 @@ import base64
 
 
 def load_results(path):
-    """Reads working.json produced by the extraction step."""
     with open(path, 'r') as f:
         return json.load(f)
 
 
 def load_countries(path):
-    """Loads IP -> country code mapping."""
     with open(path, 'r') as f:
         return json.load(f)
 
 
-def load_fraudlogix(path):
-    """Reads Fraudlogix CSV: ip,risk,datacenter,connection_type,proxy,vpn"""
+def load_ipqs(path):
+    """Reads IPQS CSV: ip,fraud_score,connection_type,proxy,vpn"""
     scores = {}
     with open(path, 'r') as f:
         for row in csv.DictReader(f):
@@ -26,41 +24,41 @@ def load_fraudlogix(path):
 
 
 def country_code_to_flag(code):
-    """Converts a 2-letter country code to a flag emoji."""
     if not code or len(code) != 2:
         return ''
     return chr(ord(code[0].upper()) + 127397) + chr(ord(code[1].upper()) + 127397)
 
 
-def classify_connection(score_row):
-    """Returns 'DataCenter' if the datacenter flag is true, else 'Residential'."""
-    if not score_row:
+def risk_level(score):
+    """Maps numeric fraud_score to a short risk label."""
+    if score is None or score == 'NA':
+        return 'NA'
+    try:
+        s = int(score)
+    except (TypeError, ValueError):
+        return 'NA'
+    if s < 30:
+        return 'Low'
+    if s < 60:
+        return 'Medium'
+    if s < 85:
+        return 'High'
+    return 'Critical'
+
+
+def connection_type(ipqs_row):
+    """Returns 'DataCenter' if connection_type is 'Data Center', else 'Residential'."""
+    if not ipqs_row:
         return 'Residential'
-    dc = str(score_row.get('datacenter', '')).strip().lower()
-    if dc in ('true', '1', 'yes'):
+    ct = (ipqs_row.get('connection_type') or '').strip().lower()
+    if ct == 'data center':
         return 'DataCenter'
     return 'Residential'
 
 
-def normalize_risk(risk):
-    """Normalizes Fraudlogix risk labels to short display form."""
-    if not risk:
-        return 'NA'
-    r = risk.strip().lower()
-    return {
-        'low': 'Low',
-        'medium': 'Medium',
-        'high': 'High',
-        'extreme': 'Extreme',
-        'na': 'NA',
-    }.get(r, risk)
-
-
 def rename_config(link, ip, country_code, risk, connection):
-    """Rewrites the #fragment of a config link to (FLAG-RISK-CONNECTION-IP)."""
     flag = country_code_to_flag(country_code)
     new_name = f"({flag}-{risk}-{connection}-{ip})"
-
     if '#' in link:
         base, _ = link.split('#', 1)
         return f"{base}#{new_name}"
@@ -70,7 +68,7 @@ def rename_config(link, ip, country_code, risk, connection):
 def main():
     results = load_results('output/working.json')
     countries = load_countries('output/countries.json')
-    fraudlogix = load_fraudlogix('output/fraudlogix_scores.csv')
+    ipqs_data = load_ipqs('output/ipqs_scores.csv')
 
     final_lines = []
     summary = []
@@ -79,14 +77,15 @@ def main():
         ip = entry['ip']
         link = entry['link']
         cc = countries.get(ip, '')
-        row = fraudlogix.get(ip, {})
+        row = ipqs_data.get(ip, {})
 
-        risk = normalize_risk(row.get('risk', 'NA'))
-        connection = classify_connection(row)
+        score = row.get('fraud_score', 'NA')
+        risk = risk_level(score)
+        conn = connection_type(row)
 
-        new_link = rename_config(link, ip, cc, risk, connection)
+        new_link = rename_config(link, ip, cc, risk, conn)
         final_lines.append(new_link)
-        summary.append(f"{cc or '??'} | {risk:<6} | {connection:<11} | {ip}")
+        summary.append(f"{cc or '??'} | {risk:<8} | {conn:<11} | {ip}")
 
     with open('output/final.txt', 'w') as f:
         f.write('\n'.join(final_lines) + '\n')
