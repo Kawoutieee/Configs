@@ -162,81 +162,73 @@ jobs:
           print(f"Kept {len(kept)} configs, dropped {dropped} by country filter.")
           PYEOF
 
-      - name: Query proxycheck.io v3 for fraud scores
+      - name: Query Fraudlogix for IP risk scores
         env:
-          PROXYCHECK_API_KEY: ${{ secrets.PROXYCHECK_API_KEY }}
+          FRAUDLOGIX_API_KEY: ${{ secrets.FRAUDLOGIX_API_KEY }}
         run: |
-          echo "ip,score,risk" > output/fraud.csv
+          echo "ip,risk,datacenter,connection_type,proxy,vpn" > output/fraudlogix_scores.csv
+
           if [ ! -s output/ips.txt ]; then
             echo "::warning::No IPs to check."
             exit 0
           fi
+
           while IFS= read -r ip; do
             [ -z "$ip" ] && continue
-            if [ -n "$PROXYCHECK_API_KEY" ]; then
-              url="https://proxycheck.io/v3/${ip}?key=${PROXYCHECK_API_KEY}"
-            else
-              url="https://proxycheck.io/v3/${ip}"
-            fi
-            response=$(curl -s "$url")
-            score=$(echo "$response" | jq -r --arg ip "$ip" '.[$ip].detections.risk // "NA"')
-            if [ "$score" = "NA" ]; then risk_label="NA"
-            elif [ "$score" -le 33 ]; then risk_label="low"
-            elif [ "$score" -le 66 ]; then risk_label="medium"
-            else risk_label="high"
-            fi
-            echo "${ip},${score},${risk_label}" >> output/fraud.csv
+
+            response=$(curl -s -H "x-api-key: ${FRAUDLOGIX_API_KEY}" \
+              "https://iplist.fraudlogix.com/v5?ip=${ip}")
+
+            risk=$(echo "$response" | jq -r '.RiskScore // "NA"')
+            dc=$(echo "$response" | jq -r '.DataCenter // false')
+            ctype=$(echo "$response" | jq -r '.ConnectionType // "NA"')
+            proxy=$(echo "$response" | jq -r '.Proxy // false')
+            vpn=$(echo "$response" | jq -r '.VPN // false')
+
+            echo "${ip},${risk},${dc},${ctype},${proxy},${vpn}" >> output/fraudlogix_scores.csv
             sleep 1
           done < output/ips.txt
-          echo "Fraud score query complete."
 
-      - name: Score filter
+          echo "Fraudlogix query complete."
+
+      - name: Filter by Fraudlogix risk level
+        env:
+          RISK_FILTER: ${{ vars.RISK_FILTER || 'low_med' }}
         run: |
           python3 <<'PYEOF'
           import csv, json, os, sys
 
-          mode = os.environ.get('SCORE_FILTER', 'lte33').strip().lower()
-          # Backwards compat: treat legacy 'lt33' as 'lte33'
-          if mode == 'lt33':
-              mode = 'lte33'
-          print(f"Score filter mode: {mode}")
+          mode = os.environ.get('RISK_FILTER', 'low_med').strip().lower()
+          allowed = {
+              'low_med': {'low', 'medium'},
+              'low':     {'low'},
+              'all':     {'low', 'medium', 'high', 'extreme', 'na'},
+          }.get(mode, {'low', 'medium'})
 
-          def passes(score):
-              if mode == 'all':
-                  return True
-              if score in (None, '', 'NA'):
-                  return False
-              try:
-                  s = int(score)
-              except (TypeError, ValueError):
-                  return False
-              if mode == 'lt50':
-                  return s < 50
-              if mode == 'lte33':
-                  return s <= 33
-              if mode == 'zero':
-                  return s == 0
-              print(f"::warning::Unknown SCORE_FILTER '{mode}', defaulting to keep-all.")
-              return True
+          print(f"Risk filter mode: {mode} -> allowed: {sorted(allowed)}")
 
           scores = {}
-          with open('output/fraud.csv') as f:
+          with open('output/fraudlogix_scores.csv') as f:
               for row in csv.DictReader(f):
                   if row.get('ip'):
-                      scores[row['ip']] = row.get('score', 'NA')
+                      scores[row['ip']] = row
 
           with open('output/working.json') as f:
               working = json.load(f)
 
-          kept = [e for e in working if passes(scores.get(e['ip'], 'NA'))]
-          dropped = len(working) - len(kept)
+          kept = []
+          for e in working:
+              s = scores.get(e['ip'], {})
+              if (s.get('risk', 'NA') or 'NA').lower() in allowed:
+                  kept.append(e)
 
+          dropped = len(working) - len(kept)
           with open('output/working.json', 'w') as f:
               json.dump(kept, f, indent=2)
 
-          print(f"Kept {len(kept)} configs after score filter, dropped {dropped}.")
+          print(f"Kept {len(kept)} configs, dropped {dropped} by risk filter.")
           PYEOF
-
+          
       - name: Merge results and rename configs
         run: python3 scripts/process.py
 
