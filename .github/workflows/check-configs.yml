@@ -162,71 +162,58 @@ jobs:
           print(f"Kept {len(kept)} configs, dropped {dropped} by country filter.")
           PYEOF
 
-      - name: Query Fraudlogix for IP risk scores
+      - name: Query IPQS for IP risk scores
         env:
-          FRAUDLOGIX_API_KEY: ${{ secrets.FRAUDLOGIX_API_KEY }}
+          IPQS_API_KEY: ${{ secrets.IPQS_API_KEY }}
         run: |
-          echo "ip,risk,datacenter,connection_type,proxy,vpn" > output/fraudlogix_scores.csv
+          echo "ip,fraud_score,connection_type,proxy,vpn" > output/ipqs_scores.csv
 
           if [ ! -s output/ips.txt ]; then
-            echo "::warning::No IPs to check."
+            echo "::warning::No IPs to check with IPQS."
             exit 0
           fi
 
           while IFS= read -r ip; do
             [ -z "$ip" ] && continue
 
-            response=$(curl -s -H "x-api-key: ${FRAUDLOGIX_API_KEY}" \
-              "https://iplist.fraudlogix.com/v5?ip=${ip}")
+            response=$(curl -s "https://www.ipqualityscore.com/api/json/ip/${IPQS_API_KEY}/${ip}")
 
-            risk=$(echo "$response" | jq -r '.RiskScore // "NA"')
-            dc=$(echo "$response" | jq -r '.DataCenter // false')
-            ctype=$(echo "$response" | jq -r '.ConnectionType // "NA"')
-            proxy=$(echo "$response" | jq -r '.Proxy // false')
-            vpn=$(echo "$response" | jq -r '.VPN // false')
+            fraud_score=$(echo "$response" | jq -r '.fraud_score // "NA"')
+            conn_type=$(echo "$response" | jq -r '.connection_type // "NA"')
+            proxy=$(echo "$response" | jq -r '.proxy // false')
+            vpn=$(echo "$response" | jq -r '.vpn // false')
 
-            echo "${ip},${risk},${dc},${ctype},${proxy},${vpn}" >> output/fraudlogix_scores.csv
+            echo "${ip},${fraud_score},${conn_type},${proxy},${vpn}" >> output/ipqs_scores.csv
             sleep 1
           done < output/ips.txt
 
-          echo "Fraudlogix query complete."
-
-      - name: Filter by Fraudlogix risk level
-        env:
-          RISK_FILTER: ${{ vars.RISK_FILTER || 'low_med' }}
+          echo "IPQS query complete."
+          
+      - name: Filter to Low/Medium IPQS risk
         run: |
           python3 <<'PYEOF'
-          import csv, json, os, sys
-
-          mode = os.environ.get('RISK_FILTER', 'low_med').strip().lower()
-          allowed = {
-              'low_med': {'low', 'medium'},
-              'low':     {'low'},
-              'all':     {'low', 'medium', 'high', 'extreme', 'na'},
-          }.get(mode, {'low', 'medium'})
-
-          print(f"Risk filter mode: {mode} -> allowed: {sorted(allowed)}")
+          import csv, json, sys
 
           scores = {}
-          with open('output/fraudlogix_scores.csv') as f:
+          with open('output/ipqs_scores.csv') as f:
               for row in csv.DictReader(f):
-                  if row.get('ip'):
-                      scores[row['ip']] = row
+                  if row.get('ip') and row.get('fraud_score', 'NA') != 'NA':
+                      scores[row['ip']] = int(row['fraud_score'])
 
           with open('output/working.json') as f:
               working = json.load(f)
 
           kept = []
           for e in working:
-              s = scores.get(e['ip'], {})
-              if (s.get('risk', 'NA') or 'NA').lower() in allowed:
+              score = scores.get(e['ip'])
+              if score is not None and score < 60:   # Low (<30) or Medium (30–59)
                   kept.append(e)
 
           dropped = len(working) - len(kept)
           with open('output/working.json', 'w') as f:
               json.dump(kept, f, indent=2)
 
-          print(f"Kept {len(kept)} configs, dropped {dropped} by risk filter.")
+          print(f"Kept {len(kept)} configs with Low/Medium risk, dropped {dropped}.")
           PYEOF
           
       - name: Merge results and rename configs
